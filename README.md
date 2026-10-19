@@ -34,8 +34,40 @@ app/build/outputs/apk/debug/
 
 If Android says *"App not installed"*, try the `armeabi-v7a` APK instead.
 
-> **Why four APKs?** The downloader bundles Python, yt-dlp and FFmpeg as native code for each
-> CPU type. Splitting keeps each APK around 70–80 MB instead of one ~300 MB file.
+### Why is the APK ~76 MB?
+
+A plain music player would be well under 10 MB. Aura Music is bigger because it carries a
+**complete YouTube-to-MP3 engine inside the app**, so no PC or server is needed.
+Measured breakdown of `app-arm64-v8a-debug.apk` (75.7 MB):
+
+| Part | Size in APK | What it is |
+|---|---|---|
+| **FFmpeg** (`libffmpeg.zip.so`) | **33.8 MB** | Audio converter: makes the MP3/M4A and embeds title, artist and cover art |
+| **Python 3.12** (`libpython.zip.so`) | **13.4 MB** | Small Python interpreter needed to run yt-dlp |
+| **yt-dlp** (`res/raw/ytdlp`) | 3.0 MB | Open-source tool that reads YouTube and finds the audio stream |
+| **QuickJS** (`libqjs.so`) | 0.4 MB | Tiny JavaScript engine that solves YouTube's player "puzzles" |
+| **App code** (`classes*.dex`) | 23.2 MB | Aura Music + Jetpack Compose, Media3, icons, coroutines. Debug builds are not shrunk |
+| Resources, icons, other | ~2 MB | Layout resources, launcher icon, metadata |
+
+**≈ 51 MB (two thirds) is the download engine.**
+
+**Why four APKs?** FFmpeg, Python and QuickJS are native programs compiled separately for
+each phone CPU type (ARM 64-bit, ARM 32-bit, x86, x86-64). One "universal" APK would contain
+all four copies (~280 MB), so the build makes one APK per CPU type and each phone only gets
+what it needs.
+
+**After installing**, the app unpacks Python and FFmpeg into its private storage on first
+launch, so storage use in *Settings → Apps → Aura Music* is noticeably larger than the
+APK itself (the packed engine plus its unpacked copy). That's normal for apps with an
+on-device FFmpeg, such as Seal.
+
+**Could it be smaller?**
+
+- **Release build with code shrinking (R8):** set `isMinifyEnabled = true` in
+  `app/build.gradle.kts` (needs keep rules for the yt-dlp library); app code would shrink from
+  ~23 MB to a few MB, giving roughly 55 MB.
+- **Server-only mode:** removing the on-device engine and always using the companion server
+  in `backend/` would bring the APK to ~10–25 MB, but then downloads need a running PC.
 
 ---
 
@@ -77,6 +109,91 @@ right away. Past downloads are listed under the **History** tab.
 
 **Tabs:** **YouTube** (youtube.com, youtu.be, Shorts, YouTube Music) · **URL** (other sites
 supported by yt-dlp) · **History**.
+
+### How YouTube downloading works (is there a server?)
+
+**No. By default there is no server.** Everything runs on the phone. The phone talks
+directly to YouTube, downloads the audio, converts it with FFmpeg, and saves the MP3. Nothing
+passes through the developer's or anyone else's computer.
+
+```
+ Phone (Aura Music)                                     Internet
+┌──────────────────────────────────────────┐
+│ 1. You paste / share a link              │
+│        ↓                                 │
+│ 2-3. yt-dlp (Python) ── asks for info ──────────→  YouTube servers
+│        ↓            ←── audio stream ────────────  (youtube.com / googlevideo.com)
+│ 4. FFmpeg → MP3 320 kbps + tags + cover  │
+│        ↓                                 │
+│ 5-6. Saved to Music/AuraMusic → Library  │
+└──────────────────────────────────────────┘
+```
+
+The engine is the open-source library
+[youtubedl-android](https://github.com/JunkFood02/youtubedl-android), the same one the
+*Seal* app uses. It bundles Python, yt-dlp, FFmpeg and QuickJS (see the size table above).
+
+**Step by step**
+
+0. **First launch (once):** the app unpacks Python and FFmpeg from the APK into private
+   storage (a few seconds; the Download page shows *Preparing the download engine…*).
+1. **Link cleanup:** `youtu.be/…`, Shorts, YouTube Music, mobile links and shared text such
+   as `Song title https://youtu.be/…` are turned into one standard
+   `https://www.youtube.com/watch?v=<id>` link. Playlist links are rejected.
+2. **Get audio (preview):** yt-dlp runs on the phone, contacts YouTube directly, and reads
+   the title, channel, length and thumbnail. This is the preview card.
+3. **Download:** yt-dlp asks YouTube for the list of streams and picks the **best
+   audio-only stream** (usually Opus/WebM, ~130–160 kbps) into a temporary cache folder.
+   The progress percentage comes from yt-dlp.
+4. **Convert:** FFmpeg encodes **MP3 at your chosen bitrate (320 kbps default)** or M4A,
+   writes **title / artist / year** tags, and embeds the video thumbnail, **cropped
+   square**, as album cover. If cover embedding fails, it retries once without it.
+5. **Save:** the file is copied to **`Music/AuraMusic/`** through Android's official
+   MediaStore API, and temporary files are deleted.
+6. **Library update:** Aura notices the new file in MediaStore and refreshes the library
+   automatically; the song is also added to **History**.
+
+During all of this a **foreground service** shows a progress notification, so Android
+doesn't stop the download when you switch apps. You can cancel anytime.
+
+**Other internet connections the app makes**
+
+| To | When | Why |
+|---|---|---|
+| YouTube | Only when you fetch/download a link | Read info + download audio |
+| GitHub (yt-dlp releases) | Every 3 days, or *Update download engine* | YouTube changes often; a fresh yt-dlp keeps downloads working |
+| LRCLIB (lrclib.net) | Only when you tap *Find lyrics online* | Lyrics |
+
+No analytics, no accounts, no data sent to the developer.
+
+**Optional companion server (off by default).** With *Settings → Download engine →
+Companion server*, the phone sends the link to **your own PC** running `backend/server.py`,
+which does the yt-dlp + FFmpeg work and streams the MP3 back:
+
+```
+Phone ──link──→ your PC (backend: yt-dlp + FFmpeg) ──→ YouTube
+Phone ←──MP3──  your PC
+```
+
+**Built-in protections against YouTube changes**
+
+- **SABR streaming:** YouTube's normal web player often offers no direct audio link
+  (*"Requested format is not available"*). The app asks through several YouTube player
+  types (`default`, `visionos`, `android_vr`, then `tv_simply`, `mweb`) that still provide
+  direct links, and automatically retries with the second set if the first fails.
+- **Safe updates:** yt-dlp updates are locked so they never replace the file while a
+  download is using it.
+- **Clear errors:** technical yt-dlp errors are turned into plain messages, with an
+  **Update engine & retry** button when that's the likely fix.
+
+**Limits**
+
+- Only what a logged-out visitor can watch: no private, members-only or age-restricted videos.
+- No DRM bypass (Premium-only tracks, movies, etc. won't work).
+- YouTube's source audio is ~130–160 kbps. A 320 kbps MP3 plays everywhere but can't add
+  quality that wasn't there. **M4A** stays closer to the original with a smaller file.
+- Many downloads in a short time from one network can trigger YouTube's bot check or
+  *"Too many requests"*. Wait a few minutes.
 
 ### If a download fails
 
