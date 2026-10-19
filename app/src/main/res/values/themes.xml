@@ -1,0 +1,11 @@
+<resources>
+    <style name="Theme.AuraMusic" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/aura_bg</item>
+        <item name="android:colorBackground">@color/aura_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:colorAccent">@color/aura_cyan</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>
